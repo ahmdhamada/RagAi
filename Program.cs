@@ -1,18 +1,32 @@
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http;
+using Microsoft.EntityFrameworkCore;
+using RagAi.Data;
 using RagAi.Models;
 using RagAi.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddHttpClient<OpenAiClient>();
-builder.Services.AddSingleton<VectorStore>();
+builder.Services.AddDbContext<RagDbContext>(options =>
+    options.UseSqlServer(
+        builder.Configuration.GetConnectionString("RagDatabase"),
+        sqlOptions => sqlOptions.EnableRetryOnFailure()));
+builder.Services.AddScoped<VectorStore>();
 builder.Services.AddScoped<RagService>();
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
+
+// This educational app creates its database/table on first run. Once the
+// schema starts changing, replace EnsureCreated with EF Core migrations.
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<RagDbContext>();
+    await db.Database.EnsureCreatedAsync();
+}
 
 app.UseSwagger();
 app.UseSwaggerUI();

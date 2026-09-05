@@ -1,27 +1,39 @@
 using RagAi.Models;
+using RagAi.Data;
+using Microsoft.EntityFrameworkCore;
 
 namespace RagAi.Services;
 
-// Plain in-memory vector store. No database, no external vector DB —
-// good enough for a demo / small knowledge base and keeps the whole
-// project dependency-free. Swap for a real vector DB later if needed.
+// Stores chunks permanently in SQL Server. The embedding is kept as JSON so
+// this works with LocalDB, SQL Server Express, and older SQL Server versions.
+// Similarity calculation runs in the app for portability; use SQL Server 2025
+// vector search when the knowledge base grows very large.
 public class VectorStore
 {
-    private readonly List<DocumentChunk> _chunks = new();
-    private readonly object _lock = new();
+    private readonly RagDbContext _db;
 
-    public void Add(DocumentChunk chunk)
+    public VectorStore(RagDbContext db)
     {
-        lock (_lock) _chunks.Add(chunk);
+        _db = db;
     }
 
-    public List<(DocumentChunk Chunk, float Score)> Search(float[] queryEmbedding, int topK)
+    public async Task AddRangeAsync(IEnumerable<DocumentChunk> chunks, CancellationToken ct = default)
     {
-        List<DocumentChunk> snapshot;
-        lock (_lock) snapshot = _chunks.ToList();
+        _db.DocumentChunks.AddRange(chunks.Select(StoredDocumentChunk.FromDomain));
+        await _db.SaveChangesAsync(ct);
+    }
 
-        return snapshot
-            .Select(c => (Chunk: c, Score: CosineSimilarity(queryEmbedding, c.Embedding)))
+    public async Task<List<(DocumentChunk Chunk, float Score)>> SearchAsync(
+        float[] queryEmbedding,
+        int topK,
+        CancellationToken ct = default)
+    {
+        var chunks = await _db.DocumentChunks
+            .AsNoTracking()
+            .ToListAsync(ct);
+
+        return chunks
+            .Select(c => (Chunk: c.ToDomain(), Score: CosineSimilarity(queryEmbedding, c.Embedding)))
             .OrderByDescending(x => x.Score)
             .Take(topK)
             .ToList();

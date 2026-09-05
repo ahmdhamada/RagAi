@@ -4,7 +4,7 @@ A minimal ASP.NET Core (.NET 9) Web API that does Retrieval-Augmented Generation
 
 ## What's here
 
-- **No database, no vector DB** — chunks and their embeddings are kept in memory (`VectorStore`). Restarting the app clears the knowledge base.
+- **SQL Server persistence** — chunks and their embeddings are stored permanently in SQL Server. Restarting the app does not clear the knowledge base.
 - **No controllers, no MVC** — everything lives in `Program.cs` as two minimal-API endpoints.
 - **One HTTP client wrapper** (`OpenAiClient`) that talks to any OpenAI-compatible `/embeddings` and `/chat/completions` API. It defaults to a local Ollama server, so it does not require a paid cloud API key.
 
@@ -16,14 +16,15 @@ A minimal ASP.NET Core (.NET 9) Web API that does Retrieval-Augmented Generation
 
 ## Setup
 
-1. Install [Ollama](https://ollama.com/download), then pull the two local models the app uses:
+1. Install SQL Server Express or LocalDB. The default connection string targets LocalDB; change `ConnectionStrings:RagDatabase` in `appsettings.json` if you use a different SQL Server instance.
+2. Install [Ollama](https://ollama.com/download), then pull the two local models the app uses:
    ```powershell
    ollama pull embeddinggemma
    ollama pull llama3.2
    ```
    Ollama normally runs at `http://localhost:11434`; the checked-in `appsettings.json` already targets its OpenAI-compatible `/v1` API. The value `ollama` for `OpenAI:ApiKey` is a harmless placeholder and is ignored by local Ollama.
-2. `dotnet run` (or F5 in Visual Studio). Check the console output / `Properties/launchSettings.json` for the actual URL and port — it varies per machine.
-3. Open `/swagger` at that URL, call `/api/ingest` with some text, then `/api/ask` with a question about it. Or use `RagAi.http` / `test-api.sh` — update the base URL at the top of whichever one you use to match your actual port first.
+3. `dotnet run` (or F5 in Visual Studio). On the first run, EF Core automatically creates the `RagAi` database and its `DocumentChunks` table.
+4. Open `/swagger` at that URL, call `/api/ingest` with some text, then `/api/ask` with a question about it. Or use `RagAi.http` / `test-api.sh` — update the base URL at the top of whichever one you use to match your actual port first.
 
 ## Why this stays cheap on tokens
 
@@ -34,6 +35,7 @@ Every knob that controls token usage lives in `appsettings.json` under `Rag`:
 - `MaxContextChars` (default 1500) — hard cap on how much retrieved text goes into the prompt, even if `TopK` matches are larger.
 - The chat prompt is just one short system instruction + the trimmed context + the question — no chat history, no few-shot examples, no extra formatting.
 - Default models are local: `embeddinggemma` for retrieval and `llama3.2` for chat. Change `OpenAI:EmbeddingModel` / `OpenAI:ChatModel` in `appsettings.json` to names you have pulled locally if you need something different.
+- Embeddings are serialized as JSON in SQL Server, which works on LocalDB and SQL Server Express. Retrieval currently loads the stored vectors and calculates cosine similarity in ASP.NET Core. For a very large collection, upgrade to SQL Server 2025/Azure SQL native vector search and move that comparison into SQL.
 
 ## Extending it later
 

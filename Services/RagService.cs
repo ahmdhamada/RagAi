@@ -33,8 +33,9 @@ public class RagService
         // requests-per-minute rate limit while ingesting a long document.
         var embeddings = await _openAi.GetEmbeddingsAsync(chunks, ct);
 
-        for (var i = 0; i < chunks.Count; i++)
-            _store.Add(new DocumentChunk(Guid.NewGuid().ToString("N"), source, chunks[i], embeddings[i]));
+        var documents = chunks.Select((chunk, i) =>
+            new DocumentChunk(Guid.NewGuid().ToString("N"), source, chunk, embeddings[i]));
+        await _store.AddRangeAsync(documents, ct);
 
         return new IngestResponse(chunks.Count, source);
     }
@@ -45,7 +46,7 @@ public class RagService
         var maxContextChars = _config.GetValue<int?>("Rag:MaxContextChars") ?? 1500;
 
         var questionEmbedding = await _openAi.GetEmbeddingAsync(request.Question, ct);
-        var matches = _store.Search(questionEmbedding, topK);
+        var matches = await _store.SearchAsync(questionEmbedding, topK, ct);
 
         if (matches.Count == 0)
         {
