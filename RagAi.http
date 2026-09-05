@@ -1,0 +1,60 @@
+@RagAi_HostAddress = http://localhost:5000
+
+### Ingest a document (adds it to the in-memory knowledge base)
+POST {{RagAi_HostAddress}}/api/ingest
+Content-Type: application/json
+
+{
+  "text": "Invento is a company based in Saudi Arabia. Our flagship product is an inventory management platform used by retail chains to track stock levels, automate reordering, and forecast demand across multiple warehouses.",
+  "source": "company-overview"
+}
+
+### Ingest a second document, to prove retrieval picks the right one
+POST {{RagAi_HostAddress}}/api/ingest
+Content-Type: application/json
+
+{
+  "text": "Our support hours are Sunday to Thursday, 9 AM to 6 PM Riyadh time. Customers can reach support by email at support@invento.sa or through the in-app chat widget.",
+  "source": "support-info"
+}
+
+### Ask a question that should be answered from the first document
+POST {{RagAi_HostAddress}}/api/ask
+Content-Type: application/json
+
+{
+  "question": "What does Invento's product do?",
+  "topK": 3
+}
+
+### Ask a question that should be answered from the second document
+POST {{RagAi_HostAddress}}/api/ask
+Content-Type: application/json
+
+{
+  "question": "What are the support hours?"
+}
+
+### Ask something not covered by any ingested text — should say it doesn't know
+POST {{RagAi_HostAddress}}/api/ask
+Content-Type: application/json
+
+{
+  "question": "What is the CEO's favorite color?"
+}
+
+### Missing "text" — should return 400 Bad Request
+POST {{RagAi_HostAddress}}/api/ingest
+Content-Type: application/json
+
+{
+  "source": "empty-test"
+}
+
+### Missing "question" — should return 400 Bad Request
+POST {{RagAi_HostAddress}}/api/ask
+Content-Type: application/json
+
+{
+  "topK": 3
+}
