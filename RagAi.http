@@ -1,4 +1,8 @@
-@RagAi_HostAddress = http://localhost:5000
+@RagAi_HostAddress = http://localhost:60110
+# Your machine's launchSettings.json uses https://localhost:60109 / http://localhost:60110
+# when run from Visual Studio. If you run with `dotnet run` from the CLI instead, it
+# usually picks http://localhost:5000 / https://localhost:5001 — update this line to match
+# whatever URL the console prints on startup.
 
 ### Ingest a document (adds it to the in-memory knowledge base)
 POST {{RagAi_HostAddress}}/api/ingest

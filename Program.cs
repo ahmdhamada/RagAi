@@ -1,6 +1,7 @@
+using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.Http;
 using RagAi.Models;
 using RagAi.Services;
-
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -16,7 +17,50 @@ var app = builder.Build();
 app.UseSwagger();
 app.UseSwaggerUI();
 
+// Global error handling: turns any unhandled exception into a clean JSON
+// response instead of a raw stack trace.
+//   - BadHttpRequestException (thrown by ASP.NET Core itself when the
+//     request body isn't valid JSON, or is missing a required field) keeps
+//     its real 400 status and a message that says what was wrong with the
+//     request — this must stay a 400, not get flattened into a generic 500.
+//   - LlmException (thrown by OpenAiClient when the provider rejects a
+//     call — e.g. 429 Too Many Requests) is passed through with its real
+//     status code and a friendly message.
+//   - Anything else becomes a generic 500.
+app.UseExceptionHandler(errApp =>
+{
+    errApp.Run(async context =>
+    {
+        var feature = context.Features.Get<IExceptionHandlerFeature>();
+        var ex = feature?.Error;
+
+        if (ex is LlmException llmEx)
+        {
+            context.Response.StatusCode = (int)llmEx.StatusCode;
+            await context.Response.WriteAsJsonAsync(new { error = llmEx.Message });
+            return;
+        }
+
+        if (ex is BadHttpRequestException badRequestEx)
+        {
+            context.Response.StatusCode = badRequestEx.StatusCode;
+            await context.Response.WriteAsJsonAsync(new
+            {
+                error = "The request body could not be read. Make sure it's valid JSON wrapped in { }, " +
+                        "with Content-Type: application/json.",
+                details = badRequestEx.Message
+            });
+            return;
+        }
+
+        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+        await context.Response.WriteAsJsonAsync(new { error = "Something went wrong processing the request." });
+    });
+});
+
 // Add a document (or a chunk of text) to the in-memory knowledge base.
+// Splits the text into chunks, embeds each one, and stores it for later
+// retrieval by /api/ask.
 app.MapPost("/api/ingest", async (IngestRequest request, RagService rag, CancellationToken ct) =>
 {
     if (string.IsNullOrWhiteSpace(request.Text))
@@ -26,7 +70,9 @@ app.MapPost("/api/ingest", async (IngestRequest request, RagService rag, Cancell
     return Results.Ok(result);
 });
 
-// Ask a question; the API retrieves the most relevant chunks and asks the LLM.
+// Ask a question. Embeds the question, retrieves the closest matching
+// chunks from the knowledge base, and asks the LLM to answer using only
+// that retrieved context.
 app.MapPost("/api/ask", async (AskRequest request, RagService rag, CancellationToken ct) =>
 {
     if (string.IsNullOrWhiteSpace(request.Question))
@@ -36,6 +82,7 @@ app.MapPost("/api/ask", async (AskRequest request, RagService rag, CancellationT
     return Results.Ok(result);
 });
 
+// Simple liveness check — confirms the API is up without calling the LLM.
 app.MapGet("/", () => "RagAi is running. See /swagger for the API.");
 
 app.Run();

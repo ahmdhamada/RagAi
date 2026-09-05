@@ -25,20 +25,18 @@ public class RagService
         var overlap = _config.GetValue<int?>("Rag:ChunkOverlapChars") ?? 50;
 
         var chunks = SplitIntoChunks(request.Text, chunkSize, overlap);
+        if (chunks.Count == 0)
+            return new IngestResponse(0, source);
 
-        var added = 0;
-        var perRequestDelayMs = _config.GetValue<int?>("Rag:PerRequestDelayMs") ?? 200; // default small throttle
-        foreach (var text in chunks)
-        {
-            var embedding = await _openAi.GetEmbeddingAsync(text, ct);
-            _store.Add(new DocumentChunk(Guid.NewGuid().ToString("N"), source, text, embedding));
-            added++;
+        // One batched call for every chunk instead of one call per chunk —
+        // fewer requests means less chance of tripping a provider's
+        // requests-per-minute rate limit while ingesting a long document.
+        var embeddings = await _openAi.GetEmbeddingsAsync(chunks, ct);
 
-            if (perRequestDelayMs > 0)
-                await Task.Delay(perRequestDelayMs, ct);
-        }
+        for (var i = 0; i < chunks.Count; i++)
+            _store.Add(new DocumentChunk(Guid.NewGuid().ToString("N"), source, chunks[i], embeddings[i]));
 
-        return new IngestResponse(added, source);
+        return new IngestResponse(chunks.Count, source);
     }
 
     public async Task<AskResponse> AskAsync(AskRequest request, CancellationToken ct)

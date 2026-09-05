@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Quick smoke test for the RagAi API. Run the app first (dotnet run), then:
-#   ./test-api.sh
-# Override the base URL if needed:
-#   BASE_URL=https://localhost:5001 ./test-api.sh
+# Quick smoke test for the RagAi API. Run the app first (dotnet run, or F5 in
+# Visual Studio), then run this script. It defaults to the port Visual
+# Studio's launchSettings.json uses (http://localhost:60110). Override it if
+# your console prints a different URL on startup (dotnet run from the CLI
+# usually picks http://localhost:5000 / https://localhost:5001 instead):
+#   BASE_URL=http://localhost:5000 ./test-api.sh
 
 set -e
-BASE_URL="${BASE_URL:-http://localhost:5000}"
+BASE_URL="${BASE_URL:-http://localhost:60110}"
 
 echo "== Ingest doc 1 (company overview) =="
 curl -s -X POST "$BASE_URL/api/ingest" \

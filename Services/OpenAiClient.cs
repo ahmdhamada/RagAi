@@ -1,132 +1,84 @@
-using System.Net.Http.Headers;
-using System.Text;
-using System.Text.Json;
 using System.Net;
-using System.Globalization;
+using System.Net.Http.Headers;
+using System.Text.Json;
 
 namespace RagAi.Services;
 
-// Thin, dependency-free wrapper around the OpenAI-compatible REST API.
-// Works with OpenAI directly, or any provider that mirrors the same
-// /embeddings and /chat/completions endpoints (Azure OpenAI, Ollama, etc.)
-// by changing OpenAI:BaseUrl in appsettings.json.
+// Thrown whenever the upstream OpenAI-compatible API rejects a call.
+// Program.cs turns this into a clean JSON error response instead of a
+// raw, unhandled-exception 500.
+public class LlmException : Exception
+{
+    public HttpStatusCode StatusCode { get; }
+
+    public LlmException(HttpStatusCode statusCode, string message) : base(message)
+    {
+        StatusCode = statusCode;
+    }
+}
+
+// Thin, dependency-free wrapper around an OpenAI-compatible REST API.
+// The default configuration targets a local Ollama server. It can also use
+// any provider that exposes /embeddings and /chat/completions.
 public class OpenAiClient
 {
     private readonly HttpClient _http;
     private readonly string _embeddingModel;
     private readonly string _chatModel;
-        private readonly Random _rng = new();
 
-        private async Task<HttpResponseMessage> PostJsonWithRetriesAsync(string url, object payload, CancellationToken ct)
-        {
-            const int maxAttempts = 7; // increased attempts to be more resilient to transient rate limits
-
-            for (int attempt = 1; attempt <= maxAttempts; attempt++)
-            {
-                HttpResponseMessage? response = null;
-                try
-                {
-                    response = await _http.PostAsJsonAsync(url, payload, ct).ConfigureAwait(false);
-
-                    if (response.IsSuccessStatusCode)
-                        return response;
-
-                    // Only retry on transient status codes
-                    if (response.StatusCode != (HttpStatusCode)429 && response.StatusCode != HttpStatusCode.ServiceUnavailable && response.StatusCode != HttpStatusCode.RequestTimeout)
-                    {
-                        return response;
-                    }
-
-                    if (attempt == maxAttempts)
-                        return response;
-
-                    // Look for Retry-After header
-                    int delayMs = (int)(1000 * Math.Pow(2, Math.Min(attempt - 1, 6))); // cap exponent to avoid huge waits
-                    if (response.Headers.TryGetValues("Retry-After", out var values))
-                    {
-                        var first = values.FirstOrDefault();
-                        if (!string.IsNullOrEmpty(first))
-                        {
-                            if (int.TryParse(first, NumberStyles.Integer, CultureInfo.InvariantCulture, out var seconds))
-                            {
-                                delayMs = Math.Max(delayMs, seconds * 1000);
-                            }
-                            else if (DateTimeOffset.TryParse(first, out var date))
-                            {
-                                var ms = (int)Math.Max(0, (date - DateTimeOffset.UtcNow).TotalMilliseconds);
-                                delayMs = Math.Max(delayMs, ms);
-                            }
-                        }
-                    }
-
-                    // Add some jitter
-                    delayMs += _rng.Next(0, 500);
-
-                    // Dispose the failed response before retrying
-                    response.Dispose();
-                    await Task.Delay(delayMs, ct).ConfigureAwait(false);
-                    continue;
-                }
-                catch when (attempt < maxAttempts)
-                {
-                    // Transient network error - wait then retry
-                    response?.Dispose();
-                    var backoff = (int)(1000 * Math.Pow(2, attempt - 1)) + _rng.Next(0, 500);
-                    await Task.Delay(backoff, ct).ConfigureAwait(false);
-                    continue;
-                }
-            }
-
-            // Shouldn't get here, but throw to satisfy the compiler
-            throw new InvalidOperationException("Failed to send request after retries.");
-        }
+    // Retry knobs for transient failures (429 rate-limits, 5xx). Kept small
+    // and cheap: a couple of retries with short backoff is enough to ride
+    // out a burst without turning every request into a long hang.
+    private const int MaxRetries = 3;
+    private static readonly TimeSpan BaseDelay = TimeSpan.FromSeconds(2);
 
     public OpenAiClient(HttpClient http, IConfiguration config)
     {
         _http = http;
 
-        var baseUrl = config["OpenAI:BaseUrl"] ?? "https://api.openai.com/v1";
+        var baseUrl = config["OpenAI:BaseUrl"] ?? "http://localhost:11434/v1";
         var apiKey = config["OpenAI:ApiKey"];
 
         _http.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
-
-        // Fail fast and give a clear actionable error when the API key is not configured.
-        if (string.IsNullOrWhiteSpace(apiKey))
-            throw new InvalidOperationException(
-                "OpenAI:ApiKey is not configured. Set it via 'dotnet user-secrets set \"OpenAI:ApiKey\" \"sk-...\"' or the OpenAI__ApiKey environment variable.");
-
-        // Azure OpenAI uses an 'api-key' header rather than 'Authorization: Bearer'.
-        if (baseUrl.Contains("openai.azure.com", StringComparison.OrdinalIgnoreCase))
-        {
-            if (_http.DefaultRequestHeaders.Contains("Authorization"))
-                _http.DefaultRequestHeaders.Remove("Authorization");
-            if (!_http.DefaultRequestHeaders.Contains("api-key"))
-                _http.DefaultRequestHeaders.Add("api-key", apiKey);
-        }
-        else
-        {
+        if (!string.IsNullOrWhiteSpace(apiKey))
             _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-        }
 
-        _embeddingModel = config["OpenAI:EmbeddingModel"] ?? "text-embedding-3-small";
-        _chatModel = config["OpenAI:ChatModel"] ?? "gpt-4o-mini";
+        _embeddingModel = config["OpenAI:EmbeddingModel"] ?? "embeddinggemma";
+        _chatModel = config["OpenAI:ChatModel"] ?? "llama3.2";
     }
 
+    // Embeds a single string. Prefer GetEmbeddingsAsync for multiple texts —
+    // it sends them in one request instead of one-per-text, which is what
+    // usually trips a 429 during ingest of a multi-chunk document.
     public async Task<float[]> GetEmbeddingAsync(string text, CancellationToken ct = default)
+        => (await GetEmbeddingsAsync(new[] { text }, ct))[0];
+
+    // Embeds many texts in a single API call. The OpenAI /embeddings endpoint
+    // accepts an array for "input", so this is just as cheap as one call and
+    // avoids hammering the rate limit with a call per chunk.
+    public async Task<List<float[]>> GetEmbeddingsAsync(IReadOnlyList<string> texts, CancellationToken ct = default)
     {
-        var payload = new { model = _embeddingModel, input = text };
-        using var response = await PostJsonWithRetriesAsync("embeddings", payload, ct);
-        response.EnsureSuccessStatusCode();
+        if (texts.Count == 0) return new List<float[]>();
+
+        var payload = new { model = _embeddingModel, input = texts };
+        using var response = await SendWithRetryAsync("embeddings", payload, ct);
 
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(ct));
-        var vector = doc.RootElement.GetProperty("data")[0].GetProperty("embedding");
+        var data = doc.RootElement.GetProperty("data");
 
-        var result = new float[vector.GetArrayLength()];
-        var i = 0;
-        foreach (var v in vector.EnumerateArray())
-            result[i++] = v.GetSingle();
+        // The API guarantees results back in the same order as the input.
+        var results = new List<float[]>(data.GetArrayLength());
+        foreach (var item in data.EnumerateArray())
+        {
+            var vector = item.GetProperty("embedding");
+            var arr = new float[vector.GetArrayLength()];
+            var i = 0;
+            foreach (var v in vector.EnumerateArray())
+                arr[i++] = v.GetSingle();
+            results.Add(arr);
+        }
 
-        return result;
+        return results;
     }
 
     // Kept intentionally small: one short system instruction + the retrieved
@@ -145,8 +97,7 @@ public class OpenAiClient
             }
         };
 
-        using var response = await PostJsonWithRetriesAsync("chat/completions", payload, ct);
-        response.EnsureSuccessStatusCode();
+        using var response = await SendWithRetryAsync("chat/completions", payload, ct);
 
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(ct));
         return doc.RootElement
@@ -155,4 +106,42 @@ public class OpenAiClient
             .GetProperty("content")
             .GetString() ?? string.Empty;
     }
+
+    // Sends a POST, retrying on 429 (rate limit) and 5xx (transient server
+    // error) with a short backoff. Honors the API's Retry-After header when
+    // it sends one. Any other failure — or running out of retries — is
+    // surfaced as an LlmException with a message worth showing a caller.
+    private async Task<HttpResponseMessage> SendWithRetryAsync(string endpoint, object payload, CancellationToken ct)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            var response = await _http.PostAsJsonAsync(endpoint, payload, ct);
+
+            if (response.IsSuccessStatusCode)
+                return response;
+
+            var isRetryable = response.StatusCode == HttpStatusCode.TooManyRequests
+                || (int)response.StatusCode >= 500;
+
+            if (!isRetryable || attempt >= MaxRetries)
+            {
+                var body = await response.Content.ReadAsStringAsync(ct);
+                var reason = response.StatusCode == HttpStatusCode.TooManyRequests
+                    ? "The LLM/embedding provider rate-limited this request (429 Too Many Requests). " +
+                      "Slow down or batch requests, then try again."
+                    : $"The LLM/embedding provider returned {(int)response.StatusCode} {response.StatusCode}.";
+
+                response.Dispose();
+                throw new LlmException(response.StatusCode, $"{reason} Details: {Truncate(body, 500)}");
+            }
+
+            var delay = response.Headers.RetryAfter?.Delta
+                ?? TimeSpan.FromSeconds(BaseDelay.TotalSeconds * Math.Pow(2, attempt));
+
+            response.Dispose();
+            await Task.Delay(delay, ct);
+        }
+    }
+
+    private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max] + "...";
 }
